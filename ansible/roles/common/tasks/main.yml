@@ -1,0 +1,182 @@
+---
+# Brings a fresh Ubuntu host to a state kubeadm will accept.
+# Runs on the control plane and on workers alike.
+
+- name: Install apt prerequisites
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gpg
+    state: present
+    update_cache: true
+
+# ---------- Swap ----------
+# kubelet refuses to start with swap on: the scheduler needs the real memory
+# figure, and swap makes that number a lie.
+
+- name: Disable swap for the current boot
+  ansible.builtin.command: swapoff -a
+  # Only acts when swap is actually on, which keeps repeat runs quiet.
+  when: ansible_swaptotal_mb | default(0) > 0
+  changed_when: true
+
+- name: Comment out swap entries in /etc/fstab
+  # Without this, swap comes back on the next reboot.
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\s*[^#\n]+\s+swap\s+.*)$'
+    replace: '# \1'
+
+# ---------- Kernel modules ----------
+# overlay      = the layered filesystem containerd builds images with
+# br_netfilter = lets iptables see traffic crossing a bridge, which is how
+#                Service routing and pod networking function
+
+- name: Load required kernel modules on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Load the kernel modules now
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop:
+    - overlay
+    - br_netfilter
+  # modprobe on an already-loaded module is a no-op, so nothing to report.
+  changed_when: false
+
+# ---------- Network sysctls ----------
+# The bridge-nf-call settings make iptables rules apply to bridged traffic,
+# and ip_forward lets the node route between pods. Without these, pods start
+# but cannot reach each other.
+
+- name: Write the Kubernetes sysctl settings
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+    owner: root
+    group: root
+    mode: '0644'
+  register: sysctl_file
+
+- name: Apply the sysctl settings
+  ansible.builtin.command: sysctl --system
+  when: sysctl_file.changed
+  changed_when: true
+
+# ---------- containerd ----------
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+
+- name: Create the containerd config directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Read the current containerd config, if there is one
+  ansible.builtin.slurp:
+    src: /etc/containerd/config.toml
+  register: containerd_config_raw
+  # A missing file is the normal case on a fresh node, not an error.
+  failed_when: false
+
+- name: Generate the full containerd config
+  # Generated only when there is no config at all, or when the existing one is
+  # a stub without a SystemdCgroup key. Regenerating unconditionally would
+  # reset the cgroup driver set below, so every run would report a change and
+  # bounce the container runtime under a live cluster.
+  ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+  when: >
+    containerd_config_raw.content is not defined
+    or 'SystemdCgroup' not in (containerd_config_raw.content | b64decode)
+
+- name: Set containerd to the systemd cgroup driver
+  # Ubuntu manages cgroups with systemd and so does kubelet. Leaving containerd
+  # on cgroupfs puts two components in contention over the same cgroups, and
+  # kubelet then fails with an error that never mentions cgroups.
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  register: cgroup_driver
+
+- name: Restart and enable containerd
+  # Restart only when the driver actually changed, so a repeat run does not
+  # bounce the runtime under a running cluster.
+  ansible.builtin.systemd:
+    name: containerd
+    state: "{{ 'restarted' if cgroup_driver.changed else 'started' }}"
+    enabled: true
+    daemon_reload: true
+
+# ---------- Kubernetes packages ----------
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Check whether the Kubernetes apt key is already installed
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  register: k8s_apt_key
+
+- name: Download the Kubernetes apt signing key
+  # Skipped once the dearmored key exists. Without this guard the download
+  # repeats on every run, because /tmp gets cleared between them.
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+    dest: /tmp/kubernetes-release.key
+    mode: '0644'
+  when: not k8s_apt_key.stat.exists
+
+- name: Convert the signing key to apt's binary format
+  ansible.builtin.command:
+    cmd: gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-release.key
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  when: not k8s_apt_key.stat.exists
+
+- name: Add the Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /"
+    filename: kubernetes
+    state: present
+
+- name: Install kubelet, kubeadm and kubectl
+  ansible.builtin.apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: true
+
+- name: Hold the Kubernetes packages at their installed version
+  # Kubernetes components are upgraded deliberately, one minor version at a
+  # time, never by a routine apt upgrade.
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl

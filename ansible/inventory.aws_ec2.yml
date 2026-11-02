@@ -1,0 +1,36 @@
+---
+# Reads the live instance list from the EC2 API on every run, so no IP is ever
+# written down and a rebuild needs no inventory edit.
+#
+# The filename must end in aws_ec2.yml or the plugin will not pick it up.
+plugin: amazon.aws.aws_ec2
+
+regions:
+  - eu-north-1
+
+filters:
+  # Only the instances this project creates, and only ones actually running,
+  # so terminated instances from an earlier build are never included.
+  tag:Name:
+    - k8s-lab-control-plane
+    - k8s-lab-worker
+  instance-state-name: running
+
+# Build Ansible groups from the Role tag on each instance. The tags are
+# "control-plane" and "worker"; replace turns the hyphen into an underscore,
+# because hyphens in group names break Jinja expressions like
+# groups['control-plane'].
+keyed_groups:
+  - key: tags.Role | replace('-', '_')
+    prefix: ''
+    separator: ''
+
+# Use the Name tag as the inventory hostname, so output is readable instead of
+# a bare IP address.
+hostnames:
+  - tag:Name
+
+compose:
+  # Connect over the public IP. Behind a VPN or bastion this would be
+  # private_ip_address instead.
+  ansible_host: public_ip_address

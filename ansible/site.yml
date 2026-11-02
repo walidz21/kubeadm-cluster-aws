@@ -1,0 +1,22 @@
+---
+# Full cluster build. Order matters: every node has to be prepared before the
+# control plane can initialise, and the control plane has to exist before a
+# worker can join it.
+
+- name: Prepare every node for Kubernetes
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: Bootstrap the control plane
+  hosts: control_plane
+  become: true
+  roles:
+    - control_plane
+
+- name: Join the workers
+  hosts: worker
+  become: true
+  roles:
+    - worker

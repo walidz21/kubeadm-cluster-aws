@@ -1,0 +1,7 @@
+---
+# Minor version of the Kubernetes apt repository. Changing this is how a
+# version upgrade starts.
+kubernetes_version: "1.36"
+
+# Must match what the CNI expects, and must not overlap the VPC range.
+pod_network_cidr: "10.244.0.0/16"

@@ -1,6 +1,6 @@
-# ---------- Provider ----------
-# Tells Terraform to talk to AWS, and pins the provider version so a future
-# AWS provider release can't silently change behaviour.
+# ---------- Providers ----------
+# Versions are pinned so a future provider release cannot silently change
+# behaviour.
 
 terraform {
   required_version = ">= 1.5"
@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -16,21 +20,40 @@ provider "aws" {
   region = var.aws_region
 }
 
+# ---------- Current public IP ----------
+# A home connection gets a new public IP regularly, and every change breaks SSH
+# and kubectl until the firewall is updated. Looking the address up here means
+# "terraform apply" alone repairs it: no variable to pass, no file to edit.
+#
+# Trade-off: this puts a network call in the plan phase, which is deliberately
+# avoided in production configs because the plan then depends on an external
+# service being reachable. Acceptable for a lab whose whole purpose is to be
+# rebuilt often.
+data "http" "my_ip" {
+  url = "https://ipv4.icanhazip.com"
+}
+
+locals {
+  # chomp strips the trailing newline the service returns.
+  # /32 restricts the rule to this one address and nothing else.
+  my_ip_cidr = "${chomp(data.http.my_ip.response_body)}/32"
+}
+
 # ---------- Network ----------
 
-# A VPC is a private network inside AWS. 10.0.0.0/16 gives us 65k addresses.
-# Note: this must NOT overlap the pod network we give Kubernetes later
-# (Flannel uses 10.244.0.0/16, which is outside this range, so we're fine).
+# A VPC is a private network inside AWS. 10.0.0.0/16 gives 65k addresses.
+# It must NOT overlap the pod network given to Kubernetes later: Flannel uses
+# 10.244.0.0/16, which sits outside this range.
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true # so instances get resolvable DNS names
+  enable_dns_hostnames = true
   enable_dns_support   = true
 
   tags = { Name = "${var.project_name}-vpc" }
 }
 
-# An internet gateway is what lets the VPC reach the public internet.
-# Without it, the nodes cannot download containerd, kubeadm or container images.
+# An internet gateway is what lets the VPC reach the public internet. Without
+# it the nodes cannot download containerd, kubeadm or any container image.
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
   tags   = { Name = "${var.project_name}-igw" }
@@ -47,8 +70,8 @@ resource "aws_subnet" "public" {
   tags = { Name = "${var.project_name}-subnet" }
 }
 
-# A route table decides where traffic goes. This one sends everything
-# not local (0.0.0.0/0) out through the internet gateway.
+# A route table decides where traffic goes. This one sends everything that is
+# not local out through the internet gateway.
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -73,38 +96,38 @@ resource "aws_security_group" "nodes" {
   description = "Firewall for the Kubernetes nodes"
   vpc_id      = aws_vpc.main.id
 
-  # SSH, only from your own IP.
+  # SSH, only from the current public IP.
   ingress {
-    description = "SSH from my laptop"
+    description = "SSH from my connection"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
+    cidr_blocks = [local.my_ip_cidr]
   }
 
-  # The Kubernetes API server, so kubectl works from your laptop.
+  # The Kubernetes API server, so kubectl works from outside the VPC.
   ingress {
-    description = "Kubernetes API from my laptop"
+    description = "Kubernetes API from my connection"
     from_port   = 6443
     to_port     = 6443
     protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
+    cidr_blocks = [local.my_ip_cidr]
   }
 
-  # NodePort range, so you can open a Service in your browser.
+  # NodePort range, so a Service can be opened in a browser.
   ingress {
-    description = "NodePort services from my laptop"
+    description = "NodePort services from my connection"
     from_port   = 30000
     to_port     = 32767
     protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
+    cidr_blocks = [local.my_ip_cidr]
   }
 
-  # THE IMPORTANT ONE. "self = true" means: allow all traffic between
-  # instances that share this security group. That covers every port
-  # Kubernetes needs internally in one rule instead of a dozen:
-  #   6443 API, 2379-2380 etcd, 10250 kubelet, 10257/10259 controller
-  #   and scheduler, 8472/UDP for Flannel's VXLAN overlay.
+  # THE IMPORTANT ONE. self = true allows all traffic between instances that
+  # share this security group, which covers every port Kubernetes needs
+  # internally in a single rule instead of a dozen: 6443 API, 2379-2380 etcd,
+  # 10250 kubelet, 10257 and 10259 controller-manager and scheduler, and
+  # 8472/UDP for Flannel's VXLAN overlay.
   ingress {
     description = "All traffic between cluster nodes"
     from_port   = 0
@@ -113,7 +136,7 @@ resource "aws_security_group" "nodes" {
     self        = true
   }
 
-  # Outbound: allow everything, so nodes can pull packages and images.
+  # Outbound: unrestricted, so nodes can pull packages and images.
   egress {
     description = "All outbound"
     from_port   = 0
@@ -126,8 +149,8 @@ resource "aws_security_group" "nodes" {
 }
 
 # ---------- SSH key ----------
-# Uploads your PUBLIC key to AWS so it gets installed on both instances.
-# The private key never leaves your machine.
+# Uploads the PUBLIC key to AWS so it is installed on both instances. The
+# private key never leaves the machine.
 resource "aws_key_pair" "main" {
   key_name   = "${var.project_name}-key"
   public_key = file(var.ssh_public_key_path)
@@ -135,8 +158,8 @@ resource "aws_key_pair" "main" {
 
 # ---------- Base image ----------
 # A data source reads something that already exists rather than creating it.
-# This finds the newest official Ubuntu 22.04 image. Owner 099720109477
-# is Canonical, so we never accidentally boot someone else's image.
+# This finds the newest official Ubuntu 22.04 image. Owner 099720109477 is
+# Canonical, so we never accidentally boot somebody else's image.
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"]
@@ -153,6 +176,8 @@ data "aws_ami" "ubuntu" {
 }
 
 # ---------- The two nodes ----------
+# The Role tag is what the Ansible dynamic inventory groups on, so these
+# values and the playbook's group names have to stay in step.
 
 resource "aws_instance" "control_plane" {
   ami                    = data.aws_ami.ubuntu.id
@@ -162,7 +187,7 @@ resource "aws_instance" "control_plane" {
   key_name               = aws_key_pair.main.key_name
 
   root_block_device {
-    volume_size = 20    # GB. Container images fill 8 GB fast.
+    volume_size = 20 # GB. Container images fill 8 GB quickly.
     volume_type = "gp3"
   }
 

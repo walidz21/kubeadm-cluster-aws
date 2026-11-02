@@ -1,0 +1,20 @@
+---
+- name: Generate a join command on the control plane
+  # Bootstrap tokens expire after 24 hours, so a fresh one is minted on every
+  # run rather than stored anywhere in the repo.
+  ansible.builtin.command: kubeadm token create --print-join-command
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  # This task belongs to the worker play but has to execute on the control
+  # plane, because that is the only host that can create a token.
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+  register: join_command
+  changed_when: false
+
+- name: Join the cluster
+  # kubelet.conf only exists after a successful join, so a repeat run skips
+  # instead of trying to re-join an already-joined node.
+  ansible.builtin.command:
+    cmd: "{{ join_command.stdout }}"
+    creates: /etc/kubernetes/kubelet.conf
