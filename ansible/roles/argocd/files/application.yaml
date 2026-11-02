@@ -1,5 +1,7 @@
-# An Argo CD Application points at a path in a Git repo and keeps the cluster
-# matching it. This one watches the Helm chart in the application repository.
+# An Argo CD Application points at a path in a Git repository and keeps the
+# cluster matching it. This one watches the Helm chart in the application
+# repository, which is deliberately a different repo from this one: this repo
+# owns the infrastructure, that one owns the application.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -13,11 +15,12 @@ spec:
     repoURL: https://github.com/walidz21/k8s-project.git
     targetRevision: main
     # Argo CD finds Chart.yaml here and renders the chart itself.
-    # No helm install is involved; Argo CD templates it and applies the output.
+    # No helm install is involved: Argo CD templates it and applies the output.
     path: helm-chart
 
   destination:
-    # The cluster Argo CD is running in, reached through the in-cluster API service.
+    # The cluster Argo CD is running in, reached through the in-cluster API
+    # service rather than an external address.
     server: https://kubernetes.default.svc
     namespace: web
 
@@ -28,5 +31,5 @@ spec:
       # Revert manual kubectl changes back to what Git says.
       selfHeal: true
     syncOptions:
-      # Create the "web" namespace rather than failing because it is missing.
+      # Create the target namespace rather than failing because it is missing.
       - CreateNamespace=true

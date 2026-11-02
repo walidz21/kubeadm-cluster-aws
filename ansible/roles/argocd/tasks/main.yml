@@ -1,0 +1,91 @@
+---
+# Installs Argo CD and points it at the application repository, so a rebuilt
+# cluster comes back with the GitOps platform already running rather than bare.
+
+- name: Create the argocd namespace
+  ansible.builtin.command: kubectl create namespace argocd
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_ns
+  changed_when: "'created' in argocd_ns.stdout"
+  # Already existing is the normal case on a repeat run, not a failure.
+  failed_when: argocd_ns.rc != 0 and 'already exists' not in argocd_ns.stderr
+
+- name: Install Argo CD
+  # --server-side is required, not optional. Client-side apply records the
+  # whole resource in a last-applied-configuration annotation, and the
+  # ApplicationSet CRD exceeds the 262144-byte annotation limit, so a plain
+  # kubectl apply fails on that one object with an error about annotation size
+  # that says nothing about apply strategy.
+  ansible.builtin.command:
+    cmd: >
+      kubectl apply -n argocd --server-side --force-conflicts
+      -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_install
+  changed_when: "'serverside-applied' in argocd_install.stdout"
+
+- name: Wait for the Argo CD API server to become available
+  # Several images have to be pulled first, so this can take a couple of
+  # minutes on a fresh cluster.
+  ansible.builtin.command:
+    cmd: kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+
+- name: Expose the Argo CD UI on a NodePort
+  # There is no cloud load balancer here, so the service is switched from its
+  # default ClusterIP. The NodePort range is already open to one source IP in
+  # the security group.
+  ansible.builtin.command:
+    cmd: kubectl patch svc argocd-server -n argocd -p '{"spec":{"type":"NodePort"}}'
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_svc
+  changed_when: "'patched' in argocd_svc.stdout and 'no change' not in argocd_svc.stdout"
+
+- name: Copy the Argo CD Application manifest to the node
+  ansible.builtin.copy:
+    src: application.yaml
+    dest: /home/ubuntu/application.yaml
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+
+- name: Register the Application with Argo CD
+  # From here Argo CD owns the deployment: it renders the Helm chart from the
+  # application repository and reconciles the cluster against it.
+  ansible.builtin.command:
+    cmd: kubectl apply -f /home/ubuntu/application.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_app
+  changed_when: "'created' in argocd_app.stdout or 'configured' in argocd_app.stdout"
+
+- name: Read the Argo CD NodePort
+  ansible.builtin.command:
+    cmd: kubectl -n argocd get svc argocd-server -o jsonpath={.spec.ports[?(@.port==443)].nodePort}
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_nodeport
+  changed_when: false
+
+- name: Read the initial admin password
+  # Argo CD generates this on first install. It disappears once the admin
+  # password is changed, so a missing secret is not an error.
+  ansible.builtin.command:
+    cmd: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath={.data.password}
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: argocd_password
+  changed_when: false
+  failed_when: false
+
+- name: Show how to reach Argo CD
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD UI: https://{{ ansible_host }}:{{ argocd_nodeport.stdout }}"
+      - "Username:   admin"
+      - "Password:   {{ (argocd_password.stdout | b64decode) if argocd_password.stdout else 'already changed, secret removed' }}"

@@ -1,7 +1,19 @@
 ---
-# Full cluster build. Order matters: every node has to be prepared before the
-# control plane can initialise, and the control plane has to exist before a
-# worker can join it.
+# Full cluster build, from bare EC2 instances to a running GitOps platform.
+#
+# Order matters: nodes have to be reachable before anything runs, prepared
+# before the control plane can initialise, and the control plane has to exist
+# before a worker can join or Argo CD can be installed.
+
+- name: Wait for the nodes to accept SSH
+  hosts: all
+  # Facts cannot be gathered until the connection works, so this play must not
+  # try. Fresh instances take 30 to 60 seconds to finish booting.
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH to answer
+      ansible.builtin.wait_for_connection:
+        timeout: 300
 
 - name: Prepare every node for Kubernetes
   hosts: all
@@ -20,3 +32,9 @@
   become: true
   roles:
     - worker
+
+- name: Install Argo CD and register the application
+  hosts: control_plane
+  become: true
+  roles:
+    - argocd

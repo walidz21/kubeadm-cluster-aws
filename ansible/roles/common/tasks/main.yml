@@ -2,6 +2,19 @@
 # Brings a fresh Ubuntu host to a state kubeadm will accept.
 # Runs on the control plane and on workers alike.
 
+- name: Set the hostname to match the node's role
+  # kubeadm registers each node under its hostname. AWS gives names like
+  # ip-10-0-1-74, which makes kubectl get nodes unreadable. Derived from the
+  # inventory name, which comes from the instance's Name tag.
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname | replace('k8s-lab-', '') }}"
+- name: Make the new hostname resolvable
+  # Without a matching hosts entry, sudo prints "unable to resolve host" on
+  # every command and some tools fail outright.
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ inventory_hostname | replace('k8s-lab-', '') }}"
 - name: Install apt prerequisites
   ansible.builtin.apt:
     name:
