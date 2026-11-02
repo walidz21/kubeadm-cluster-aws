@@ -42,8 +42,8 @@ cluster, Argo CD delivers the application from a separate repository.
 ## Two repositories, one platform
 
 Infrastructure and application are deliberately separate. This repository owns the
-cluster. The application repository owns what runs on it. Argo CD is the only thing
-that spans both.
+cluster. The application repository, [k8s-project](https://github.com/walidz21/k8s-project),
+owns what runs on it. Argo CD is the only thing that spans both.
 
 ```
   kubeadm-cluster-aws                      k8s-project
