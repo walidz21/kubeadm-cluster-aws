@@ -1,0 +1,5 @@
+# Shell scripts and Terraform files must keep LF endings. Windows line endings
+# make bash fail on Linux with an error that does not mention line endings.
+*.sh text eol=lf
+*.tf text eol=lf
+*.hcl text eol=lf

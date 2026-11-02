@@ -1,0 +1,10 @@
+# Terraform's record of what it created. Has resource IDs and sometimes
+# secrets in plaintext. Never commit this.
+*.tfstate
+*.tfstate.*
+
+# Downloaded provider binaries. terraform init regenerates them.
+.terraform/
+
+# Has your home IP in it.
+terraform.tfvars
